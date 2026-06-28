@@ -22,13 +22,15 @@ entity.icon_mipmaps = nil
 
 -- Custom in-world sprite, applied to all four directions. Factorio's camera is
 -- fixed (top always recedes upward), so a rotated combinator keeps the same
--- silhouette; one clean front render reads correctly from every facing.
--- SCALE/SHIFT are the in-game tweak knobs: SCALE sizes the box on the tile,
--- SHIFT nudges it (negative y = up). graphics/entity.png is a 256x256 square
--- with the object centered (~244px wide).
+-- silhouette; one clean render (Gemini image-to-image off the real constant
+-- combinator, so the oblique pose matches) reads correctly from every facing.
+-- graphics/entity.png is a 256x256 square, object centered. SCALE/SHIFT are the
+-- in-game tweak knobs. Reference: the base combinator's metal box is ~1.1 tiles
+-- (HR frame 114px @ scale 0.5); our box is ~190px in the 256 png, so
+-- 190*SCALE/32 ~= 1.1 tiles -> SCALE ~= 0.18. Tune by eye in-game.
 local ENTITY_SPRITE = "__belt-counter__/graphics/entity.png"
-local SCALE = 0.14          -- ~1.07 tiles wide
-local SHIFT = { 0, -0.05 }  -- slight upward nudge
+local SCALE = 0.18          -- ~1.1 tiles for the box body
+local SHIFT = { 0, -0.05 }  -- slight upward nudge (negative y = up)
 
 local function dir_sprite()
   return {
