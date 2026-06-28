@@ -232,6 +232,14 @@ local function build_panel(player)
   })
   frame.style.minimal_width = 280
 
+  -- Persistent setup reminder: the wired belt must be in "read contents -> pulse"
+  -- mode or counts will be wrong. Hover for the full how-to.
+  local help = frame.add({ type = "label", name = "bc_help", caption = { "belt-counter.help-line" } })
+  help.tooltip = { "belt-counter.help-tooltip" }
+  help.style.font_color = { 0.85, 0.78, 0.55 }
+  help.style.single_line = false
+  help.style.bottom_margin = 6
+
   local summary = frame.add({ type = "label", name = "bc_summary" })
   summary.style.bottom_margin = 6
 
