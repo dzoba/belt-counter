@@ -7,28 +7,50 @@
 --   throughput. 2.0 circuit signals carry quality, so we bucket per (item,
 --   quality).
 --
---   We read the connected red & green networks every tick and add the pulses to
---   a ring of 1-second buckets (a rolling window) plus lifetime totals.
+--   Each tick we read the connected red & green networks and add the pulses to
+--   SEVERAL independent ring buffers, one per time window (5s/1m/10m/1h/10h),
+--   the same way the engine's production statistics keep one series per
+--   precision level. "All" is derived from lifetime totals.
 --
---   When "output rates" is enabled, the counter emits the measured items/min as
---   constant-combinator output. Because that output lands on the same network we
---   read, we subtract our own last output from each read (feedback cancellation).
+--   When circuit output is enabled, the counter emits the measured rate as
+--   constant-combinator output. That output lands on the same network we read,
+--   so we subtract our own last output from each read (feedback cancellation).
 
 local NAME = "belt-counter"
 
-local BUCKET_TICKS = 60          -- 1 second per bucket
-local NUM_BUCKETS  = 30          -- rolling window length (seconds)
-local OUTPUT_EVERY = 15          -- recompute circuit output 4x/second
-local GUI_REFRESH  = 15          -- redraw open GUIs 4x/second
-local GRAPH_MAX_H  = 80          -- px, tallest graph bar
-local BAR_W        = 7           -- px, graph bar width
+local OUTPUT_EVERY = 15           -- recompute circuit output 4x/second
+local GUI_REFRESH  = 15           -- redraw open windows ~4x/second
+local GRAPH_MAX_H  = 90           -- px, tallest graph bar
+local BAR_W        = 4            -- px, graph bar width
+
+-- Time windows. Each is an independent ring of `samples` buckets; a bucket
+-- advances every `seconds*60/samples` ticks. "all" has no ring (lifetime).
+local WINDOWS = {
+  { id = "5s",  label = "5s",  seconds = 5,     samples = 50 },
+  { id = "1m",  label = "1m",  seconds = 60,    samples = 60 },
+  { id = "10m", label = "10m", seconds = 600,   samples = 60 },
+  { id = "1h",  label = "1h",  seconds = 3600,  samples = 60 },
+  { id = "10h", label = "10h", seconds = 36000, samples = 60 },
+  { id = "all", label = "All", seconds = nil,   samples = 0  },
+}
+local RING_WINDOWS = 5            -- first N entries are real rings; last is "all"
+local DEFAULT_WIN  = 2            -- 1m
+
+-- Display units. factor converts items/second into the unit; stacks is special.
+local UNITS = {
+  { id = "per_s", label = "items/s", factor = 1,    suffix = "/s" },
+  { id = "per_m", label = "items/min", factor = 60,   suffix = "/m" },
+  { id = "per_h", label = "items/h", factor = 3600, suffix = "/h" },
+  { id = "stacks_s", label = "stacks/s", stacks = true, suffix = " stk/s" },
+}
+local DEFAULT_UNIT = 1
 
 local QUALITY_COLOR = {
-  normal    = {0.85, 0.85, 0.85},
-  uncommon  = {0.4,  0.9,  0.4 },
-  rare      = {0.4,  0.6,  1.0 },
-  epic      = {0.75, 0.4,  1.0 },
-  legendary = {1.0,  0.6,  0.2 },
+  normal    = { 0.85, 0.85, 0.85 },
+  uncommon  = { 0.4,  0.9,  0.4 },
+  rare      = { 0.4,  0.6,  1.0 },
+  epic      = { 0.75, 0.4,  1.0 },
+  legendary = { 1.0,  0.6,  0.2 },
 }
 local QUALITY_LETTER = {
   normal = "N", uncommon = "U", rare = "R", epic = "E", legendary = "L",
@@ -41,22 +63,55 @@ local function round(x) return math.floor(x + 0.5) end
 
 local function key_of(name, quality) return name .. "/" .. quality end
 
-local function new_bucket() return { total = 0, by_key = {} } end
+local function new_sample() return { total = 0, by_key = {} } end
 
+local function stack_size(name)
+  local proto = prototypes.item[name]
+  return (proto and proto.stack_size) or 1
+end
+
+local function fmt(v)
+  if v == 0 then return "0" end
+  if v >= 100 then return tostring(round(v)) end
+  return string.format("%.1f", v)
+end
+
+-- per-second value -> string in the given unit
+local function fmt_unit(per_sec, unit, item_name)
+  if unit.stacks then
+    return fmt(per_sec / stack_size(item_name)) .. unit.suffix
+  end
+  return fmt(per_sec * unit.factor) .. unit.suffix
+end
+
+----------------------------------------------------------------------
+-- counter data model
+----------------------------------------------------------------------
 local function fresh_counter(entity)
-  local buckets = {}
-  for i = 1, NUM_BUCKETS do buckets[i] = new_bucket() end
+  local windows = {}
+  for w = 1, RING_WINDOWS do
+    local def = WINDOWS[w]
+    local samples = {}
+    for i = 1, def.samples do samples[i] = new_sample() end
+    windows[w] = {
+      samples  = samples,
+      idx      = 1,
+      ticks    = 0,
+      interval = math.max(1, round(def.seconds * 60 / def.samples)),
+      warm     = 1,
+    }
+  end
   return {
     entity         = entity,
     unit_number    = entity.unit_number,
-    buckets        = buckets,
-    idx            = 1,          -- current (newest) bucket
-    tick_in_bucket = 0,
-    warm           = 1,          -- buckets that have collected data (<= NUM_BUCKETS)
-    totals         = {},         -- key -> lifetime count
-    meta           = {},         -- key -> {name=, quality=}
+    windows        = windows,
+    totals         = {},          -- key -> lifetime count
+    meta           = {},          -- key -> {name=, quality=}
+    start_tick     = nil,         -- set on first tick we see it
     output_enabled = false,
-    last_output    = {},         -- key -> count we emitted (for feedback cancel)
+    last_output    = {},          -- key -> count we emitted (feedback cancel)
+    sel_win        = DEFAULT_WIN, -- selected window index (1..#WINDOWS)
+    unit_idx       = DEFAULT_UNIT,
   }
 end
 
@@ -84,15 +139,12 @@ end
 ----------------------------------------------------------------------
 -- reading signals
 ----------------------------------------------------------------------
--- Accumulate item signals from a network into `into` (key -> count), recording
--- prototype info in `meta`.
 local function read_network(entity, connector, into, meta)
   local net = entity.get_circuit_network(connector)
   if not (net and net.signals) then return end
   for _, s in pairs(net.signals) do
     local sig = s.signal
-    -- when reading, type is nil for items
-    if sig.type == nil or sig.type == "item" then
+    if sig.type == nil or sig.type == "item" then   -- type is nil for items when read
       local quality = sig.quality or "normal"
       local k = key_of(sig.name, quality)
       into[k] = (into[k] or 0) + s.count
@@ -102,27 +154,29 @@ local function read_network(entity, connector, into, meta)
 end
 
 ----------------------------------------------------------------------
--- rate computation
+-- rates
 ----------------------------------------------------------------------
--- Sum each key over the whole window. Returns key->count_in_window and the
--- window length in seconds.
-local function window_sums(c)
+-- per-second rate for every key in the selected window. Returns table key->rate
+-- and the window's elapsed seconds (for context).
+local function rates_for(c, win_index)
+  local rates = {}
+  if win_index == #WINDOWS then
+    -- "All": lifetime totals over uptime
+    local uptime = math.max(1, (game.tick - (c.start_tick or game.tick)) / 60)
+    for k, v in pairs(c.totals) do rates[k] = v / uptime end
+    return rates, uptime
+  end
+  local win = c.windows[win_index]
+  local def = WINDOWS[win_index]
   local sums = {}
-  for i = 1, NUM_BUCKETS do
-    for k, v in pairs(c.buckets[i].by_key) do
+  for i = 1, def.samples do
+    for k, v in pairs(win.samples[i].by_key) do
       sums[k] = (sums[k] or 0) + v
     end
   end
-  return sums, c.warm
-end
-
-local function rate_per_min(c)
-  local sums, seconds = window_sums(c)
-  local rates = {}
-  for k, v in pairs(sums) do
-    rates[k] = v / seconds * 60
-  end
-  return rates
+  local elapsed = math.max(0.001, math.min(win.warm, def.samples) * win.interval / 60)
+  for k, v in pairs(sums) do rates[k] = v / elapsed end
+  return rates, elapsed
 end
 
 ----------------------------------------------------------------------
@@ -138,15 +192,14 @@ end
 
 local function write_output(c)
   if not c.entity.valid then return end
-  local rates = rate_per_min(c)
+  -- Output uses the currently selected window's per-minute rate.
+  local rates = rates_for(c, c.sel_win)
   local cb = c.entity.get_or_create_control_behavior()
   local section = cb.get_section(1) or cb.add_section()
   if not section then return end
-
-  local filters = {}
-  local emitted = {}
+  local filters, emitted = {}, {}
   for k, meta in pairs(c.meta) do
-    local r = round(rates[k] or 0)
+    local r = round((rates[k] or 0) * 60)   -- items/min
     if r ~= 0 then
       filters[#filters + 1] = {
         value = { type = "item", name = meta.name, quality = meta.quality, comparator = "=" },
@@ -164,50 +217,53 @@ end
 ----------------------------------------------------------------------
 local function tick_counter(c, tick)
   if not c.entity.valid then return false end
+  if not c.start_tick then c.start_tick = tick end
 
   local incoming = {}
   read_network(c.entity, defines.wire_connector_id.circuit_red, incoming, c.meta)
   read_network(c.entity, defines.wire_connector_id.circuit_green, incoming, c.meta)
-
-  -- cancel our own emitted output so only real belt pulses remain
   if c.output_enabled then
     for k, v in pairs(c.last_output) do
-      incoming[k] = (incoming[k] or 0) - v
+      incoming[k] = (incoming[k] or 0) - v       -- cancel our own emitted rate (items/min)
     end
   end
 
-  local bucket = c.buckets[c.idx]
+  -- add to every ring window's current sample + lifetime totals
   for k, v in pairs(incoming) do
     if v > 0 then
-      bucket.total = bucket.total + v
-      bucket.by_key[k] = (bucket.by_key[k] or 0) + v
+      for w = 1, RING_WINDOWS do
+        local s = c.windows[w].samples[c.windows[w].idx]
+        s.total = s.total + v
+        s.by_key[k] = (s.by_key[k] or 0) + v
+      end
       c.totals[k] = (c.totals[k] or 0) + v
     end
   end
 
-  -- advance bucket once per second
-  c.tick_in_bucket = c.tick_in_bucket + 1
-  if c.tick_in_bucket >= BUCKET_TICKS then
-    c.tick_in_bucket = 0
-    c.idx = (c.idx % NUM_BUCKETS) + 1
-    c.buckets[c.idx] = new_bucket()
-    if c.warm < NUM_BUCKETS then c.warm = c.warm + 1 end
+  -- advance each window independently
+  for w = 1, RING_WINDOWS do
+    local win = c.windows[w]
+    win.ticks = win.ticks + 1
+    if win.ticks >= win.interval then
+      win.ticks = 0
+      win.idx = (win.idx % WINDOWS[w].samples) + 1
+      win.samples[win.idx] = new_sample()
+      if win.warm < WINDOWS[w].samples then win.warm = win.warm + 1 end
+    end
   end
 
-  if c.output_enabled and tick % OUTPUT_EVERY == 0 then
-    write_output(c)
-  end
+  if c.output_enabled and tick % OUTPUT_EVERY == 0 then write_output(c) end
   return true
 end
 
 local function on_tick(event)
   if not next(storage.counters) then return end
   local tick = event.tick
-  local dead = nil
-  for unit_number, c in pairs(storage.counters) do
+  local dead
+  for un, c in pairs(storage.counters) do
     if not tick_counter(c, tick) then
       dead = dead or {}
-      dead[#dead + 1] = unit_number
+      dead[#dead + 1] = un
     end
   end
   if dead then for _, un in pairs(dead) do unregister(un) end end
@@ -216,81 +272,119 @@ end
 ----------------------------------------------------------------------
 -- GUI
 ----------------------------------------------------------------------
-local function build_panel(player)
-  local rel = player.gui.relative
-  if rel.belt_counter_panel then return rel.belt_counter_panel end
+local function close_window(player)
+  local w = player.gui.screen.belt_counter_window
+  if w then w.destroy() end
+  storage.open[player.index] = nil
+end
 
-  local frame = rel.add({
-    type = "frame",
-    name = "belt_counter_panel",
-    caption = { "belt-counter.window-title" },
-    direction = "vertical",
-    anchor = {
-      gui = defines.relative_gui_type.constant_combinator_gui,
-      position = defines.relative_gui_position.right,
-    },
+local function build_window(player, c)
+  close_window(player)
+  local win = player.gui.screen.add({
+    type = "frame", name = "belt_counter_window", direction = "vertical",
   })
-  frame.style.minimal_width = 280
+  win.auto_center = true
 
-  -- Persistent setup reminder: the wired belt must be in "read contents -> pulse"
-  -- mode or counts will be wrong. Hover for the full how-to.
-  local help = frame.add({ type = "label", name = "bc_help", caption = { "belt-counter.help-line" } })
+  -- titlebar (draggable) ------------------------------------------------
+  local title = win.add({ type = "flow", name = "bc_titlebar", direction = "horizontal" })
+  title.drag_target = win
+  title.add({ type = "sprite", sprite = "item/" .. NAME })
+  title.add({ type = "label", caption = { "belt-counter.window-title" }, style = "frame_title" })
+  local pusher = title.add({ type = "empty-widget", style = "draggable_space_header" })
+  pusher.style.horizontally_stretchable = true
+  pusher.style.height = 24
+  pusher.drag_target = win
+  local unit_dd = title.add({ type = "drop-down", name = "bc_unit", selected_index = c.unit_idx })
+  for _, u in ipairs(UNITS) do unit_dd.add_item(u.label) end
+  title.add({
+    type = "sprite-button", name = "bc_close", style = "frame_action_button",
+    sprite = "utility/close", hovered_sprite = "utility/close", tooltip = { "gui.close" },
+  })
+
+  local body = win.add({ type = "frame", name = "bc_body", style = "inside_shallow_frame_with_padding", direction = "vertical" })
+
+  -- setup reminder ------------------------------------------------------
+  local help = body.add({ type = "label", caption = { "belt-counter.help-line" } })
   help.tooltip = { "belt-counter.help-tooltip" }
   help.style.font_color = { 0.85, 0.78, 0.55 }
-  help.style.single_line = false
   help.style.bottom_margin = 6
 
-  local summary = frame.add({ type = "label", name = "bc_summary" })
-  summary.style.bottom_margin = 6
+  -- window (timescale) toggle ------------------------------------------
+  local winrow = body.add({ type = "flow", name = "bc_winrow", direction = "horizontal" })
+  winrow.add({ type = "label", caption = { "belt-counter.window-label" } }).style.right_margin = 6
+  for i, def in ipairs(WINDOWS) do
+    local b = winrow.add({
+      type = "button", name = "bc_win_" .. i, caption = def.label, style = "button",
+      tags = { bc_win = i },
+    })
+    b.style.width = 44
+    b.style.height = 26
+    b.style.padding = 0
+    b.toggled = (i == c.sel_win)
+  end
 
-  frame.add({ type = "label", caption = "Throughput (last " .. NUM_BUCKETS .. "s)" })
-  local graph_bg = frame.add({ type = "frame", name = "bc_graph_bg", style = "inside_shallow_frame" })
-  graph_bg.style.height = GRAPH_MAX_H + 8
+  body.add({ type = "label", name = "bc_summary" }).style.top_margin = 6
+
+  -- graph ---------------------------------------------------------------
+  local graph_bg = body.add({ type = "frame", name = "bc_graph_bg", style = "inside_deep_frame" })
+  graph_bg.style.height = GRAPH_MAX_H + 10
   graph_bg.style.horizontally_stretchable = true
+  graph_bg.style.top_margin = 4
   local graph = graph_bg.add({ type = "flow", name = "bc_graph", direction = "horizontal" })
   graph.style.horizontal_spacing = 1
   graph.style.vertical_align = "bottom"
-  graph.style.top_padding = 4
+  graph.style.padding = 4
 
-  frame.add({ type = "line" })
-  local scroll = frame.add({ type = "scroll-pane", name = "bc_scroll" })
-  scroll.style.maximal_height = 200
+  -- per item+quality table ---------------------------------------------
+  local scroll = body.add({ type = "scroll-pane", name = "bc_scroll" })
+  scroll.style.maximal_height = 240
+  scroll.style.top_margin = 6
   local tbl = scroll.add({ type = "table", name = "bc_table", column_count = 4 })
-  tbl.style.horizontal_spacing = 8
+  tbl.style.horizontal_spacing = 10
+  tbl.style.vertical_spacing = 4
 
-  frame.add({ type = "line" })
-  frame.add({
-    type = "checkbox",
-    name = "bc_output",
+  -- footer: circuit output ---------------------------------------------
+  body.add({ type = "line" }).style.top_margin = 6
+  local foot = body.add({ type = "flow", direction = "horizontal" })
+  foot.style.top_margin = 6
+  foot.style.vertical_align = "center"
+  foot.add({
+    type = "checkbox", name = "bc_output", state = c.output_enabled,
     caption = { "belt-counter.output-rates" },
-    state = false,
   })
 
-  return frame
+  storage.open[player.index] = c.unit_number
+  return win
 end
 
-local function refresh_panel(player, c)
-  local frame = player.gui.relative.belt_counter_panel
-  if not frame then return end
+local function refresh_window(player, c)
+  local win = player.gui.screen.belt_counter_window
+  if not win then return end
+  local body = win.bc_body
+  local unit = UNITS[c.unit_idx]
+  local rates = rates_for(c, c.sel_win)
 
-  local rates = rate_per_min(c)
+  -- summary
+  local total = 0
+  for _, r in pairs(rates) do total = total + r end
+  body.bc_summary.caption = { "belt-counter.total-line", fmt_unit(total, unit, nil) }
 
-  -- summary: current total items/min
-  local total_rate = 0
-  for _, r in pairs(rates) do total_rate = total_rate + r end
-  frame.bc_summary.caption = "Total: " .. round(total_rate) .. "/min"
-
-  -- graph: oldest -> newest left to right
-  local graph = frame.bc_graph_bg.bc_graph
+  -- graph: for ring windows use that window's samples; for "All" use the
+  -- coarsest ring (10h) as a proxy curve.
+  local gi = (c.sel_win == #WINDOWS) and RING_WINDOWS or c.sel_win
+  local gwin = c.windows[gi]
+  local gdef = WINDOWS[gi]
+  local graph = body.bc_graph_bg.bc_graph
   graph.clear()
-  local max_total = 1
-  for i = 1, NUM_BUCKETS do
-    if c.buckets[i].total > max_total then max_total = c.buckets[i].total end
+  local maxv = 1
+  for i = 1, gdef.samples do
+    if gwin.samples[i].total > maxv then maxv = gwin.samples[i].total end
   end
-  for i = 1, NUM_BUCKETS do
-    local bi = ((c.idx + i - 1) % NUM_BUCKETS) + 1   -- start just past newest = oldest
-    local val = c.buckets[bi].total
-    local h = math.max(0, round(val / max_total * GRAPH_MAX_H))
+  local sample_secs = gwin.interval / 60
+  for i = 1, gdef.samples do
+    local bi = ((gwin.idx + i - 1) % gdef.samples) + 1   -- oldest -> newest
+    local val = gwin.samples[bi].total
+    local h = math.max(0, round(val / maxv * GRAPH_MAX_H))
     local col = graph.add({ type = "flow", direction = "vertical" })
     col.style.vertical_spacing = 0
     local filler = col.add({ type = "empty-widget" })
@@ -298,95 +392,129 @@ local function refresh_panel(player, c)
     filler.style.height = GRAPH_MAX_H - h
     local bar = col.add({ type = "empty-widget", style = "belt_counter_bar" })
     bar.style.height = h
-    bar.tooltip = tostring(val) .. " items/s"
+    bar.tooltip = fmt_unit(val / sample_secs, unit, nil)
   end
 
-  -- per (item,quality) table
-  local tbl = frame.bc_scroll.bc_table
+  -- table
+  local tbl = body.bc_scroll.bc_table
   tbl.clear()
-  for _, h in pairs({ "", "/min", "total", "" }) do
-    local lbl = tbl.add({ type = "label", caption = h })
-    lbl.style.font = "default-bold"
+  for _, h in ipairs({ "", { "belt-counter.col-item" }, { "belt-counter.col-rate" }, { "belt-counter.col-share" } }) do
+    tbl.add({ type = "label", caption = h, style = "bold_label" })
   end
-
   local keys = {}
   for k in pairs(c.meta) do keys[#keys + 1] = k end
-  table.sort(keys, function(a, b)
-    local ma, mb = c.meta[a], c.meta[b]
-    if ma.name ~= mb.name then return ma.name < mb.name end
-    return ma.quality < mb.quality
-  end)
+  table.sort(keys, function(a, b) return (rates[a] or 0) > (rates[b] or 0) end)
 
   if #keys == 0 then
     tbl.add({ type = "label", caption = { "belt-counter.no-data" } })
   else
-    for _, k in pairs(keys) do
+    for _, k in ipairs(keys) do
       local m = c.meta[k]
-      local icon = tbl.add({ type = "sprite", sprite = "item/" .. m.name })
-      icon.style.size = 24
-      icon.tooltip = m.name
+      local r = rates[k] or 0
+      local icon = tbl.add({ type = "sprite", sprite = "item/" .. m.name, tooltip = m.name })
+      icon.style.size = 28
 
-      local rate_lbl = tbl.add({ type = "label", caption = tostring(round(rates[k] or 0)) })
+      local name_lbl = tbl.add({
+        type = "label",
+        caption = { "", { "item-name." .. m.name }, m.quality ~= "normal" and (" (" .. (QUALITY_LETTER[m.quality] or "?") .. ")") or "" },
+      })
+      name_lbl.style.font_color = QUALITY_COLOR[m.quality] or { 1, 1, 1 }
 
-      tbl.add({ type = "label", caption = tostring(c.totals[k] or 0) })
+      tbl.add({ type = "label", caption = fmt_unit(r, unit, m.name) })
 
-      local q = tbl.add({ type = "label", caption = (QUALITY_LETTER[m.quality] or "?") })
-      q.style.font_color = QUALITY_COLOR[m.quality] or {1, 1, 1}
-      q.style.font = "default-bold"
-      q.tooltip = m.quality
-      rate_lbl.style.font_color = QUALITY_COLOR[m.quality] or {1, 1, 1}
-    end
-  end
-end
-
-local function on_gui_opened(event)
-  local entity = event.entity
-  local player = game.get_player(event.player_index)
-  if not player then return end
-  local panel = player.gui.relative.belt_counter_panel
-  if entity and entity.valid and entity.name == NAME then
-    local c = storage.counters[entity.unit_number]
-    if not c then register(entity); c = storage.counters[entity.unit_number] end
-    panel = build_panel(player)
-    panel.visible = true
-    panel.bc_output.state = c.output_enabled
-    storage.open[event.player_index] = entity.unit_number
-    refresh_panel(player, c)
-  elseif panel then
-    -- a vanilla constant combinator (or anything else) opened: hide our panel
-    panel.visible = false
-  end
-end
-
-local function on_gui_closed(event)
-  local player = game.get_player(event.player_index)
-  if player and player.gui.relative.belt_counter_panel then
-    player.gui.relative.belt_counter_panel.visible = false
-  end
-  storage.open[event.player_index] = nil
-end
-
-local function on_gui_checked(event)
-  if event.element.name ~= "bc_output" then return end
-  local un = storage.open[event.player_index]
-  local c = un and storage.counters[un]
-  if not c then return end
-  c.output_enabled = event.element.state
-  if not c.output_enabled then clear_output(c) end
-end
-
-local function refresh_open_guis()
-  for player_index, unit_number in pairs(storage.open) do
-    local c = storage.counters[unit_number]
-    local player = game.get_player(player_index)
-    if player and c and c.entity.valid then
-      refresh_panel(player, c)
+      local share = (total > 0) and (r / total) or 0
+      local cell = tbl.add({ type = "flow", direction = "horizontal" })
+      cell.style.vertical_align = "center"
+      cell.add({ type = "progressbar", value = share }).style.width = 70
+      cell.add({ type = "label", caption = string.format("%d%%", round(share * 100)) }).style.left_margin = 6
     end
   end
 end
 
 ----------------------------------------------------------------------
--- event wiring
+-- GUI events
+----------------------------------------------------------------------
+local function counter_for_player(player_index)
+  local un = storage.open[player_index]
+  return un and storage.counters[un]
+end
+
+local function on_gui_opened(event)
+  local entity = event.entity
+  if not (entity and entity.valid and entity.name == NAME) then return end
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  local c = storage.counters[entity.unit_number]
+  if not c then register(entity); c = storage.counters[entity.unit_number] end
+  local win = build_window(player, c)
+  player.opened = win                 -- replaces the vanilla combinator GUI
+  refresh_window(player, c)
+end
+
+local function on_gui_closed(event)
+  local el = event.element
+  if el and el.valid and el.name == "belt_counter_window" then
+    local player = game.get_player(event.player_index)
+    if player then close_window(player) end
+  end
+end
+
+local function on_gui_click(event)
+  local el = event.element
+  if not (el and el.valid) then return end
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  if el.name == "bc_close" then
+    close_window(player)
+    return
+  end
+  local tags = el.tags
+  if tags and tags.bc_win then
+    local c = counter_for_player(event.player_index)
+    if not c then return end
+    c.sel_win = tags.bc_win
+    -- update toggled states
+    local winrow = el.parent
+    for _, child in pairs(winrow.children) do
+      if child.tags and child.tags.bc_win then child.toggled = (child.tags.bc_win == c.sel_win) end
+    end
+    refresh_window(player, c)
+  end
+end
+
+local function on_gui_selection(event)
+  local el = event.element
+  if not (el and el.valid and el.name == "bc_unit") then return end
+  local player = game.get_player(event.player_index)
+  local c = counter_for_player(event.player_index)
+  if player and c then
+    c.unit_idx = el.selected_index
+    refresh_window(player, c)
+  end
+end
+
+local function on_gui_checked(event)
+  if event.element.name ~= "bc_output" then return end
+  local c = counter_for_player(event.player_index)
+  if not c then return end
+  c.output_enabled = event.element.state
+  if not c.output_enabled then clear_output(c) end
+end
+
+local function refresh_open_windows()
+  for player_index, un in pairs(storage.open) do
+    local c = storage.counters[un]
+    local player = game.get_player(player_index)
+    if player and c and c.entity.valid then
+      refresh_window(player, c)
+    elseif player then
+      close_window(player)
+    end
+  end
+end
+
+----------------------------------------------------------------------
+-- build / remove
 ----------------------------------------------------------------------
 local function on_built(event)
   register(event.entity or event.created_entity)
@@ -401,32 +529,27 @@ local FILTER = { { filter = "name", name = NAME } }
 
 local function register_events()
   script.on_event(defines.events.on_tick, on_tick)
-  script.on_nth_tick(GUI_REFRESH, refresh_open_guis)
+  script.on_nth_tick(GUI_REFRESH, refresh_open_windows)
 
-  local built = {
-    defines.events.on_built_entity,
-    defines.events.on_robot_built_entity,
-    defines.events.script_raised_built,
-    defines.events.script_raised_revive,
+  for _, ev in pairs({
+    defines.events.on_built_entity, defines.events.on_robot_built_entity,
+    defines.events.script_raised_built, defines.events.script_raised_revive,
     defines.events.on_space_platform_built_entity,
-  }
-  for _, ev in pairs(built) do
+  }) do
     if ev then script.on_event(ev, on_built, FILTER) end
   end
-
-  local removed = {
-    defines.events.on_player_mined_entity,
-    defines.events.on_robot_mined_entity,
-    defines.events.on_entity_died,
-    defines.events.script_raised_destroy,
+  for _, ev in pairs({
+    defines.events.on_player_mined_entity, defines.events.on_robot_mined_entity,
+    defines.events.on_entity_died, defines.events.script_raised_destroy,
     defines.events.on_space_platform_mined_entity,
-  }
-  for _, ev in pairs(removed) do
+  }) do
     if ev then script.on_event(ev, on_removed, FILTER) end
   end
 
   script.on_event(defines.events.on_gui_opened, on_gui_opened)
   script.on_event(defines.events.on_gui_closed, on_gui_closed)
+  script.on_event(defines.events.on_gui_click, on_gui_click)
+  script.on_event(defines.events.on_gui_selection_state_changed, on_gui_selection)
   script.on_event(defines.events.on_gui_checked_state_changed, on_gui_checked)
 end
 
@@ -436,9 +559,7 @@ script.on_init(function()
   register_events()
 end)
 
-script.on_load(function()
-  register_events()
-end)
+script.on_load(register_events)
 
 script.on_configuration_changed(function()
   storage.counters = storage.counters or {}
