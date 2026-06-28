@@ -25,26 +25,33 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW = os.path.join(REPO, "graphics", "_raw")
 ENV_PATH = os.path.expanduser("~/dev/hexfall/.env")
 
-# Factorio-appropriate art direction: top-down-ish 3/4 industrial machine,
-# transparent background, painterly sprite style consistent with vanilla.
+# Factorio-appropriate art direction. Crucial: Factorio uses an ORTHOGRAPHIC,
+# front-facing camera tilted slightly downward (like the vanilla combinators) --
+# NOT an isometric / corner-on / 3-quarter cube. The front face must sit square
+# to the viewer with all edges parallel to the image axes.
 STYLE = (
-    "Factorio-style game asset, high-detail painterly industrial sci-fi machine, "
-    "3/4 top-down view, sitting on a transparent background, crisp edges, "
-    "consistent with vanilla Factorio combinator art (dark metal casing, teal/green "
-    "indicator lights, riveted panels), single object centered, no shadow on ground, "
-    "no text."
+    "Factorio-style game asset, high-detail painterly industrial sci-fi machine. "
+    "Rendered in Factorio's camera angle: an orthographic FRONT view seen slightly "
+    "from above (about a 30-degree downward tilt), with the flat front face squarely "
+    "facing the viewer and every edge parallel to the image axes. "
+    "It is NOT isometric, NOT rotated to show a corner, NOT a 3/4 view -- you look "
+    "straight at the front panel with just the top surface receding upward. "
+    "Sitting on a fully transparent background, crisp clean edges, dark metal casing "
+    "with teal/green indicator lights and riveted panels, single object centered, "
+    "no cast shadow on the ground, no text."
 )
 
 PROMPTS = {
     "icon": (
-        "Item icon for a 'Belt Counter' combinator: a small dark metal combinator "
-        "box with a glowing digital counter display showing scrolling numbers and a "
-        "tiny conveyor-belt arrow motif. " + STYLE
+        "Item icon for a 'Belt Counter' combinator: a compact dark metal combinator "
+        "box whose flat front panel carries a glowing horizontal digital counter "
+        "display showing scrolling green numbers, with a small conveyor-belt arrow "
+        "motif beneath the digits. The front panel faces the viewer head-on. " + STYLE
     ),
     "entity": (
-        "A 'Belt Counter' machine that sits beside a conveyor belt: a combinator-sized "
-        "dark metal device with a glowing numeric tally readout on its face and a small "
-        "antenna/sensor, circuit-wire connector nubs on top. " + STYLE
+        "A 'Belt Counter' machine, combinator-sized: a dark metal device whose flat "
+        "front panel shows a glowing green numeric tally readout, with small circuit-"
+        "wire connector nubs on top. The front panel faces the viewer head-on. " + STYLE
     ),
 }
 
