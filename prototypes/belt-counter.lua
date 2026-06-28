@@ -20,6 +20,38 @@ entity.icon_size = 64
 entity.icons = nil
 entity.icon_mipmaps = nil
 
+-- Custom in-world sprite, applied to all four directions. Factorio's camera is
+-- fixed (top always recedes upward), so a rotated combinator keeps the same
+-- silhouette; one clean front render reads correctly from every facing.
+-- SCALE/SHIFT are the in-game tweak knobs: SCALE sizes the box on the tile,
+-- SHIFT nudges it (negative y = up). graphics/entity.png is a 256x256 square
+-- with the object centered (~244px wide).
+local ENTITY_SPRITE = "__belt-counter__/graphics/entity.png"
+local SCALE = 0.14          -- ~1.07 tiles wide
+local SHIFT = { 0, -0.05 }  -- slight upward nudge
+
+local function dir_sprite()
+  return {
+    layers = {
+      {
+        filename = ENTITY_SPRITE,
+        priority = "high",
+        width = 256,
+        height = 256,
+        scale = SCALE,
+        shift = SHIFT,
+      },
+    },
+  }
+end
+
+entity.sprites = {
+  north = dir_sprite(),
+  east  = dir_sprite(),
+  south = dir_sprite(),
+  west  = dir_sprite(),
+}
+
 ----------------------------------------------------------------------
 -- Item
 ----------------------------------------------------------------------
