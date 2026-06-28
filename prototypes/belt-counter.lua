@@ -15,6 +15,21 @@ entity.name = "belt-counter"
 entity.minable = { mining_time = 0.1, result = "belt-counter" }
 entity.fast_replaceable_group = nil
 entity.next_upgrade = nil
+
+-- Lock orientation. Facing is functionally irrelevant (the counter reads its
+-- belt through the circuit wire, not by adjacency), and clean 4-direction art
+-- wasn't worth it, so we disable rotation: one correct sprite, no wire-stub
+-- mismatch. R does nothing on this building.
+entity.flags = entity.flags or {}
+table.insert(entity.flags, "not-rotatable")
+
+-- Point every wire connection at the south (bottom-front) position so the real
+-- circuit wire emerges near the painted stubs regardless of default facing.
+-- Defensive: only if the field is present in this base version.
+local cp = entity.circuit_wire_connection_points
+if cp and cp[3] then
+  entity.circuit_wire_connection_points = { cp[3], cp[3], cp[3], cp[3] }
+end
 entity.icon = ICON
 entity.icon_size = 64
 entity.icons = nil
