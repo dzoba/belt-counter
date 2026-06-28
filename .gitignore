@@ -1,0 +1,17 @@
+# Factorio packaging
+*.zip
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# local secrets / env (we read keys from the hexfall .env at runtime, never commit)
+.env
+*.env
+
+# asset-gen scratch
+tools/__pycache__/
+tools/.venv/
+graphics/_raw/

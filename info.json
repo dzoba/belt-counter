@@ -1,0 +1,12 @@
+{
+  "name": "belt-counter",
+  "version": "0.1.0",
+  "title": "Belt Counter",
+  "author": "dzoba",
+  "factorio_version": "2.0",
+  "description": "A combinator-style building that measures belt throughput over time and breaks it down by quality. Wire it to a belt set to 'read belt contents (pulse)' and open it for a live graph.",
+  "dependencies": [
+    "base >= 2.0",
+    "? quality"
+  ]
+}
