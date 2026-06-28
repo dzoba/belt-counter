@@ -83,15 +83,17 @@ item.order = "c[combinators]-z[belt-counter]"
 item.subgroup = item.subgroup or "circuit-network"
 
 ----------------------------------------------------------------------
--- Recipe (available immediately for early testing)
+-- Recipe: modeled on the constant combinator (5 copper cable + 2 electronic
+-- circuit) with extra circuitry for the counting logic. Gated behind the same
+-- technology that unlocks the combinators (see below), so enabled = false.
 ----------------------------------------------------------------------
 local recipe = {
   type = "recipe",
   name = "belt-counter",
-  enabled = true,
-  energy_required = 1,
+  enabled = false,
+  energy_required = 0.5,
   ingredients = {
-    { type = "item", name = "constant-combinator", amount = 1 },
+    { type = "item", name = "copper-cable", amount = 5 },
     { type = "item", name = "electronic-circuit", amount = 5 },
   },
   results = {
@@ -100,3 +102,9 @@ local recipe = {
 }
 
 data:extend({ entity, item, recipe })
+
+-- Unlock alongside the combinators via the circuit-network technology.
+local tech = data.raw.technology["circuit-network"]
+if tech then
+  table.insert(tech.effects, { type = "unlock-recipe", recipe = "belt-counter" })
+end
