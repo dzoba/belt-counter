@@ -24,6 +24,7 @@ local OUTPUT_EVERY = 15           -- recompute circuit output 4x/second
 local GUI_REFRESH  = 15           -- redraw open windows ~4x/second
 local GRAPH_MAX_H  = 90           -- px, tallest graph bar
 local BAR_W        = 5            -- px, graph bar width (contiguous = area chart)
+local STRUCT_VERSION = 2          -- bump when the window's element layout changes
 
 -- Config / helpers / data model live in the testable model module.
 local WINDOWS        = M.WINDOWS
@@ -154,6 +155,7 @@ local function build_window(player, c)
   close_window(player)
   local win = player.gui.screen.add({
     type = "frame", name = "belt_counter_window", direction = "vertical",
+    tags = { struct = STRUCT_VERSION },
   })
   win.auto_center = true
 
@@ -241,6 +243,8 @@ end
 local function refresh_window(player, c)
   local win = player.gui.screen.belt_counter_window
   if not win then return end
+  -- discard a window left over from an older mod version (different layout)
+  if (win.tags.struct or 0) ~= STRUCT_VERSION then close_window(player); return end
   local body = win.bc_body
   local unit = UNITS[c.unit_idx]
   local rates = rates_for(c, c.sel_win)
@@ -483,5 +487,11 @@ script.on_load(register_events)
 script.on_configuration_changed(function()
   storage.counters = storage.counters or {}
   storage.open = storage.open or {}
+  -- close any windows left open across a mod update; they rebuild on next open
+  for _, player in pairs(game.players) do
+    local w = player.gui.screen.belt_counter_window
+    if w then w.destroy() end
+  end
+  storage.open = {}
   rescan()
 end)
