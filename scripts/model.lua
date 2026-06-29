@@ -128,6 +128,27 @@ function M.accumulate(c, incoming, tick)
   end
 end
 
+-- Subtract our own last-emitted output from a freshly-read network so only real
+-- belt pulses remain. The constant combinator emits its output onto the same
+-- wire we read, so without this the counter would tally its own output.
+function M.apply_feedback(incoming, last_output)
+  for k, v in pairs(last_output) do
+    incoming[k] = (incoming[k] or 0) - v
+  end
+end
+
+-- The circuit output to emit for the selected window: key -> items/min (rounded,
+-- nonzero only). control.lua maps these keys to item+quality signal filters.
+function M.compute_output(c, win_index, now_tick)
+  local rates = M.rates_for(c, win_index, now_tick)
+  local out = {}
+  for k, r in pairs(rates) do
+    local per_min = round(r * 60)
+    if per_min ~= 0 then out[k] = per_min end
+  end
+  return out
+end
+
 -- per-second rate for every key in the selected window. now_tick is required for
 -- the "All" window (lifetime average over uptime).
 function M.rates_for(c, win_index, now_tick)

@@ -118,6 +118,33 @@ do
   ok(c.windows[4].warm < 5,  "1h still warming")
 end
 
+print("feedback cancellation: count stays accurate with circuit output ON")
+do
+  -- Simulate control.lua's real loop: each tick the wire carries the belt's
+  -- pulse PLUS whatever the counter is currently emitting. If feedback
+  -- cancellation is wrong, the counter tallies its own output and the rate
+  -- explodes. Belt = 1 iron/tick = a true 60/s.
+  local c = counter()
+  c.output_enabled = true
+  c.sel_win = 2 -- 1m
+  local OUTPUT_EVERY = 15
+  local our_output = {} -- what the constant combinator currently puts on the wire
+  for tick = 1, 40000 do
+    local wire = { [IRON] = 1 }                     -- belt pulse this tick
+    for k, v in pairs(our_output) do wire[k] = (wire[k] or 0) + v end  -- + our own output
+    M.apply_feedback(wire, c.last_output)           -- real cancellation code
+    M.accumulate(c, wire, tick)
+    if tick % OUTPUT_EVERY == 0 then
+      our_output = M.compute_output(c, c.sel_win, tick)  -- real output code
+      c.last_output = our_output
+    end
+  end
+  local r = M.rates_for(c, 2, 40000)[IRON]
+  near(r, 60, 2, "1m rate stays ~60/s despite the counter's own output on the wire")
+  -- and prove the test is meaningful: the counter WAS emitting a large value
+  ok((our_output[IRON] or 0) > 1000, "counter was actually emitting (~3600/min) — feedback had real work to do")
+end
+
 ----------------------------------------------------------------------
 print(string.format("\n%d checks, %d failures", n, fails))
 os.exit(fails == 0 and 0 or 1)

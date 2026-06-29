@@ -94,20 +94,18 @@ end
 
 local function write_output(c)
   if not c.entity.valid then return end
-  -- Output uses the currently selected window's per-minute rate.
-  local rates = rates_for(c, c.sel_win)
+  local emitted = M.compute_output(c, c.sel_win, game.tick)   -- key -> items/min
   local cb = c.entity.get_or_create_control_behavior()
   local section = cb.get_section(1) or cb.add_section()
   if not section then return end
-  local filters, emitted = {}, {}
-  for k, meta in pairs(c.meta) do
-    local r = round((rates[k] or 0) * 60)   -- items/min
-    if r ~= 0 then
+  local filters = {}
+  for k, count in pairs(emitted) do
+    local meta = c.meta[k]
+    if meta then
       filters[#filters + 1] = {
         value = { type = "item", name = meta.name, quality = meta.quality, comparator = "=" },
-        min = r,
+        min = count,
       }
-      emitted[k] = r
     end
   end
   section.filters = filters
@@ -123,11 +121,7 @@ local function tick_counter(c, tick)
   local incoming = {}
   read_network(c.entity, defines.wire_connector_id.circuit_red, incoming, c.meta)
   read_network(c.entity, defines.wire_connector_id.circuit_green, incoming, c.meta)
-  if c.output_enabled then
-    for k, v in pairs(c.last_output) do
-      incoming[k] = (incoming[k] or 0) - v       -- cancel our own emitted rate (items/min)
-    end
-  end
+  if c.output_enabled then M.apply_feedback(incoming, c.last_output) end
 
   M.accumulate(c, incoming, tick)
 
