@@ -13,6 +13,15 @@ local function bar(tint)
   }
 end
 
+-- highlighted slot for the currently-focused item's icon
+styles["belt_counter_sel_slot"] = {
+  type = "button_style",
+  parent = "slot_button",
+  default_graphical_set = { base = { filename = "__core__/graphics/white-square.png", size = 1, tint = { 0.30, 0.55, 0.48, 1 } } },
+  hovered_graphical_set = { base = { filename = "__core__/graphics/white-square.png", size = 1, tint = { 0.38, 0.68, 0.58, 1 } } },
+  clicked_graphical_set = { base = { filename = "__core__/graphics/white-square.png", size = 1, tint = { 0.30, 0.55, 0.48, 1 } } },
+}
+
 styles["belt_counter_bar"]           = bar({ 0.48, 0.80, 0.78, 1 })  -- neutral teal
 styles["belt_counter_bar_normal"]    = bar({ 0.85, 0.85, 0.85, 1 })
 styles["belt_counter_bar_uncommon"]  = bar({ 0.40, 0.90, 0.40, 1 })
