@@ -1,8 +1,20 @@
 # Belt Counter
 
-A Factorio **2.0 / Space Age** mod that adds a combinator-style building — the
-**Belt Counter** — which measures item **throughput over time** on a belt and
+A Factorio **2.0 / Space Age** mod that adds a combinator-style building, the
+**Belt Counter**, which measures item **throughput over time** on a belt and
 breaks it down **by quality**.
+
+## Screenshots
+
+Click the building to open a live readout: a line graph over the selected time
+window, plus a per-item, per-quality rate table. Click an item to focus the
+graph on it.
+
+![The Belt Counter window: time-window buttons, a line graph with a Y axis, and a per-item, per-quality rate table](docs/screenshots/window.png)
+
+Wired to a belt set to "read belt contents (pulse)":
+
+![A Belt Counter wired to a transport belt in-world](docs/screenshots/in-world.png)
 
 ## Concept
 
