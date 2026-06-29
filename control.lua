@@ -30,7 +30,6 @@ local WINDOWS        = M.WINDOWS
 local RING_WINDOWS   = M.RING_WINDOWS
 local UNITS          = M.UNITS
 local QUALITY_COLOR  = M.QUALITY_COLOR
-local QUALITY_LETTER = M.QUALITY_LETTER
 local round          = M.round
 local key_of         = M.key_of
 local fmt_unit       = M.fmt_unit
@@ -237,42 +236,60 @@ local function refresh_window(player, c)
   local unit = UNITS[c.unit_idx]
   local rates = rates_for(c, c.sel_win)
 
-  -- summary
+  -- focus: nil = all items; otherwise restrict the graph + summary to one key
+  local fk = c.focus_key
+  if fk and not c.meta[fk] then fk = nil; c.focus_key = nil end
+  local function sample_value(s) return fk and (s.by_key[fk] or 0) or s.total end
+
   local total = 0
   for _, r in pairs(rates) do total = total + r end
-  body.bc_summary.caption = { "belt-counter.total-line", fmt_unit(total, unit, nil) }
 
-  -- graph: for ring windows use that window's samples; for "All" use the
-  -- coarsest ring (10h) as a proxy curve.
+  -- summary
+  if fk then
+    local m = c.meta[fk]
+    body.bc_summary.caption = {
+      "", { "item-name." .. m.name },
+      (m.quality ~= "normal") and (" [quality=" .. m.quality .. "]") or "",
+      ":  ", fmt_unit(rates[fk] or 0, unit, m.name),
+      "      ", { "belt-counter.clear-focus" },
+    }
+  else
+    body.bc_summary.caption = { "belt-counter.total-line", fmt_unit(total, unit, nil) }
+  end
+
+  -- graph: ring windows plot their own samples; "All" uses the coarsest (10h)
+  -- ring as a proxy. With a focus set, plot only that item's series.
   local gi = (c.sel_win == #WINDOWS) and RING_WINDOWS or c.sel_win
   local gwin = c.windows[gi]
   local gdef = WINDOWS[gi]
+  local gname = fk and c.meta[fk].name or nil
   local graph = body.bc_graph_bg.bc_graph
   graph.clear()
   local maxv = 1
   for i = 1, gdef.samples do
-    if gwin.samples[i].total > maxv then maxv = gwin.samples[i].total end
+    local v = sample_value(gwin.samples[i])
+    if v > maxv then maxv = v end
   end
   local sample_secs = gwin.interval / 60
   for i = 1, gdef.samples do
     local bi = ((gwin.idx + i - 1) % gdef.samples) + 1   -- oldest -> newest
-    local val = gwin.samples[bi].total
-    local h = math.max(0, round(val / maxv * GRAPH_MAX_H))
+    local val = sample_value(gwin.samples[bi])
+    local hgt = math.max(0, round(val / maxv * GRAPH_MAX_H))
     local col = graph.add({ type = "flow", direction = "vertical" })
     col.style.vertical_spacing = 0
     local filler = col.add({ type = "empty-widget" })
     filler.style.width = BAR_W
-    filler.style.height = GRAPH_MAX_H - h
+    filler.style.height = GRAPH_MAX_H - hgt
     local bar = col.add({ type = "empty-widget", style = "belt_counter_bar" })
-    bar.style.height = h
-    bar.tooltip = fmt_unit(val / sample_secs, unit, nil)
+    bar.style.height = hgt
+    bar.tooltip = fmt_unit(val / sample_secs, unit, gname)
   end
 
-  -- table
+  -- table: one clickable row per item+quality (click the icon to focus)
   local tbl = body.bc_scroll.bc_table
   tbl.clear()
-  for _, h in ipairs({ "", { "belt-counter.col-item" }, { "belt-counter.col-rate" }, { "belt-counter.col-share" } }) do
-    tbl.add({ type = "label", caption = h, style = "bold_label" })
+  for _, hd in ipairs({ "", { "belt-counter.col-item" }, { "belt-counter.col-rate" }, { "belt-counter.col-share" } }) do
+    tbl.add({ type = "label", caption = hd, style = "bold_label" })
   end
   local keys = {}
   for k in pairs(c.meta) do keys[#keys + 1] = k end
@@ -284,14 +301,23 @@ local function refresh_window(player, c)
     for _, k in ipairs(keys) do
       local m = c.meta[k]
       local r = rates[k] or 0
-      local icon = tbl.add({ type = "sprite", sprite = "item/" .. m.name, tooltip = m.name })
-      icon.style.size = 28
 
-      local name_lbl = tbl.add({
-        type = "label",
-        caption = { "", { "item-name." .. m.name }, m.quality ~= "normal" and (" (" .. (QUALITY_LETTER[m.quality] or "?") .. ")") or "" },
+      -- clickable item icon focuses the graph on this item
+      local btn = tbl.add({
+        type = "sprite-button", sprite = "item/" .. m.name, style = "slot_button",
+        tags = { bc_focus = k }, tooltip = { "item-name." .. m.name },
       })
+      btn.style.size = 32
+      btn.toggled = (c.focus_key == k)
+
+      -- name + the quality symbol (no letter)
+      local cap = (m.quality == "normal")
+        and { "item-name." .. m.name }
+        or  { "", { "item-name." .. m.name }, "  [quality=" .. m.quality .. "]" }
+      local name_lbl = tbl.add({ type = "label", caption = cap })
+      name_lbl.style.font = "default-large-semibold"
       name_lbl.style.font_color = QUALITY_COLOR[m.quality] or { 1, 1, 1 }
+      name_lbl.style.left_margin = 8
 
       tbl.add({ type = "label", caption = fmt_unit(r, unit, m.name) })
 
@@ -351,6 +377,12 @@ local function on_gui_click(event)
     for _, child in pairs(winrow.children) do
       if child.tags and child.tags.bc_win then child.toggled = (child.tags.bc_win == c.sel_win) end
     end
+    refresh_window(player, c)
+  elseif tags and tags.bc_focus then
+    local c = counter_for_player(event.player_index)
+    if not c then return end
+    -- toggle: click the focused item again to clear back to "all"
+    c.focus_key = (c.focus_key == tags.bc_focus) and nil or tags.bc_focus
     refresh_window(player, c)
   end
 end

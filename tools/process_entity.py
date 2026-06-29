@@ -17,51 +17,66 @@ from PIL import Image
 ALPHA_FLOOR = 30   # pixels fainter than this become fully transparent
 
 
-def remove_white_bg(img, tol=38, feather=55):
+def remove_white_bg(img, lo=208, hi=246, chroma=22):
+    """Global chroma-key: any low-saturation, bright pixel is the white
+    background and becomes transparent — ANYWHERE in the image, so white
+    trapped inside the wire loops is cleared too, not just the outer border.
+    A feathered band (lo..hi) fades edge pixels so there's no white halo.
+
+    The object's colored parts (green display, brass, red/green wires, dark
+    metal) have real chroma or are darker than `lo`, so they survive.
+    """
     img = img.convert("RGBA")
     w, h = img.size
     px = img.load()
-
-    def near_white(c, t):
-        return c[0] >= 255 - t and c[1] >= 255 - t and c[2] >= 255 - t
-
-    visited = bytearray(w * h)
-    dq = deque()
-    for x in range(w):
-        dq.append((x, 0)); dq.append((x, h - 1))
-    for y in range(h):
-        dq.append((0, y)); dq.append((w - 1, y))
-
-    # flood fill the connected white background
-    while dq:
-        x, y = dq.popleft()
-        i = y * w + x
-        if visited[i]:
-            continue
-        visited[i] = 1
-        c = px[x, y]
-        if near_white(c, tol):
-            px[x, y] = (c[0], c[1], c[2], 0)
-            if x + 1 < w and not visited[i + 1]: dq.append((x + 1, y))
-            if x - 1 >= 0 and not visited[i - 1]: dq.append((x - 1, y))
-            if y + 1 < h and not visited[i + w]: dq.append((x, y + 1))
-            if y - 1 >= 0 and not visited[i - w]: dq.append((x, y - 1))
-
-    # feather: soften light edge pixels that touch a now-transparent pixel
+    span = float(hi - lo)
     for y in range(h):
         for x in range(w):
-            c = px[x, y]
-            if c[3] == 0:
+            r, g, b, a = px[x, y]
+            if a == 0:
                 continue
-            lum = (c[0] + c[1] + c[2]) / 3
-            if lum >= 255 - feather:
-                touches = False
+            mx, mn = max(r, g, b), min(r, g, b)
+            if (mx - mn) <= chroma and mn >= lo:    # low-saturation & bright = background
+                if mn >= hi:
+                    px[x, y] = (r, g, b, 0)
+                else:
+                    fade = int(max(0, min(255, (hi - mn) / span * 255)))
+                    px[x, y] = (r, g, b, min(a, fade))
+    return img
+
+
+def defringe(img, passes=2, dark=120, light=205, chroma=28):
+    """Peel the white anti-aliasing fringe: edge pixels that blend object with
+    white background are mid-gray (below the chroma-key threshold) and survive
+    as a thin light outline — most visible on a gray backdrop. For each opaque
+    pixel ON the transparent boundary that is low-saturation and light, fade its
+    alpha (fully at `light`, untouched at `dark`). Colored edges (wires, brass,
+    display) are high-chroma and protected; the dark metal silhouette stays.
+    Snapshots per pass so erosion is controlled (≈1px/pass)."""
+    img = img.convert("RGBA")
+    w, h = img.size
+    px = img.load()
+    span = float(light - dark)
+    for _ in range(passes):
+        clear = []
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = px[x, y]
+                if a == 0:
+                    continue
+                boundary = False
                 for nx, ny in ((x+1, y), (x-1, y), (x, y+1), (x, y-1)):
                     if 0 <= nx < w and 0 <= ny < h and px[nx, ny][3] == 0:
-                        touches = True; break
-                if touches:
-                    a = int(max(0, min(255, (255 - lum) / feather * 255)))
-                    px[x, y] = (c[0], c[1], c[2], a)
+                        boundary = True
+                        break
+                if not boundary:
+                    continue
+                mx, mn = max(r, g, b), min(r, g, b)
+                if (mx - mn) <= chroma and mn >= dark:
+                    na = 0 if mn >= light else int(a * (light - mn) / span)
+                    clear.append((x, y, r, g, b, na))
+        for x, y, r, g, b, na in clear:
+            px[x, y] = (r, g, b, na)
     return img
 
 
@@ -75,7 +90,9 @@ def main():
 
     img = Image.open(src).convert("RGBA")
     if "--white-bg" in sys.argv:
-        img = remove_white_bg(img)
+        # chroma allowance raised so faintly-tinted fringe near the wires is
+        # caught; gated to light pixels (dark metal + saturated wires survive).
+        img = defringe(remove_white_bg(img), passes=3, dark=108, light=212, chroma=42)
 
     px = img.load()
     w, h = img.size

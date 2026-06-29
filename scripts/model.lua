@@ -97,6 +97,7 @@ function M.fresh_counter(entity)
     last_output    = {},
     sel_win        = M.DEFAULT_WIN,
     unit_idx       = M.DEFAULT_UNIT,
+    focus_key      = nil,         -- nil = graph shows all items; else a single key
   }
 end
 
