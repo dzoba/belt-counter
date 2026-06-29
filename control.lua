@@ -216,12 +216,6 @@ local function draw_chart(player, c, gwin, gdef, maxv, fk)
   local function px(i) return x0 + (i - 1) / (N - 1) * CHART_W end
   local function py(v) return y0 + CHART_H * (1 - v / maxv) end   -- world Y is down
 
-  local verts = { { x0, y0 + CHART_H } }
-  for i = 1, N do verts[#verts + 1] = { px(i), py(vals[i]) } end
-  verts[#verts + 1] = { x0 + CHART_W, y0 + CHART_H }
-  ids[#ids + 1] = rendering.draw_polygon({ vertices = verts,
-    color = { col[1], col[2], col[3], 0.22 }, surface = surf, players = pf }).id
-
   for i = 1, N - 1 do
     ids[#ids + 1] = rendering.draw_line({ from = { px(i), py(vals[i]) }, to = { px(i + 1), py(vals[i + 1]) },
       color = col, width = 2, surface = surf, players = pf }).id
@@ -435,6 +429,8 @@ local function refresh_window(player, c)
       })
       btn.elem_value = { name = m.name, quality = m.quality }
       btn.locked = true
+      -- highlight the focused item's icon background
+      if c.focus_key == k then pcall(function() btn.style = "belt_counter_sel_slot" end) end
 
       -- plain item name (quality is shown by the badge on the icon)
       local name_lbl = tbl.add({ type = "label", caption = { "item-name." .. m.name } })
@@ -510,7 +506,11 @@ local function on_gui_click(event)
     local c = counter_for_player(event.player_index)
     if not c then return end
     -- toggle: click the focused item again to clear back to "all"
-    c.focus_key = (c.focus_key == tags.bc_focus) and nil or tags.bc_focus
+    if c.focus_key == tags.bc_focus then
+      c.focus_key = nil
+    else
+      c.focus_key = tags.bc_focus
+    end
     refresh_window(player, c)
   end
 end
