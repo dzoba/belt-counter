@@ -23,7 +23,7 @@ local NAME = "belt-counter"
 local OUTPUT_EVERY = 15           -- recompute circuit output 4x/second
 local GUI_REFRESH  = 15           -- redraw open windows ~4x/second
 local GRAPH_MAX_H  = 90           -- px, tallest graph bar
-local BAR_W        = 4            -- px, graph bar width
+local BAR_W        = 5            -- px, graph bar width (contiguous = area chart)
 
 -- Config / helpers / data model live in the testable model module.
 local WINDOWS        = M.WINDOWS
@@ -198,12 +198,21 @@ local function build_window(player, c)
   body.add({ type = "label", name = "bc_summary" }).style.top_margin = 6
 
   -- graph ---------------------------------------------------------------
+  -- axis row: peak value (Y) on the left, time span (X) on the right
+  local axis = body.add({ type = "flow", name = "bc_axis", direction = "horizontal" })
+  axis.style.top_margin = 4
+  local peak = axis.add({ type = "label", name = "bc_peak" })
+  peak.style.font_color = { 0.7, 0.7, 0.7 }
+  local apush = axis.add({ type = "empty-widget" })
+  apush.style.horizontally_stretchable = true
+  local span = axis.add({ type = "label", name = "bc_span" })
+  span.style.font_color = { 0.7, 0.7, 0.7 }
+
   local graph_bg = body.add({ type = "frame", name = "bc_graph_bg", style = "inside_deep_frame" })
-  graph_bg.style.height = GRAPH_MAX_H + 10
+  graph_bg.style.height = GRAPH_MAX_H + 8
   graph_bg.style.horizontally_stretchable = true
-  graph_bg.style.top_margin = 4
   local graph = graph_bg.add({ type = "flow", name = "bc_graph", direction = "horizontal" })
-  graph.style.horizontal_spacing = 1
+  graph.style.horizontal_spacing = 0   -- contiguous = area chart
   graph.style.vertical_align = "bottom"
   graph.style.padding = 4
 
@@ -248,9 +257,8 @@ local function refresh_window(player, c)
   if fk then
     local m = c.meta[fk]
     body.bc_summary.caption = {
-      "", { "item-name." .. m.name },
-      (m.quality ~= "normal") and (" [quality=" .. m.quality .. "]") or "",
-      ":  ", fmt_unit(rates[fk] or 0, unit, m.name),
+      "", "[item=" .. m.name .. ",quality=" .. m.quality .. "] ",
+      { "item-name." .. m.name }, ":  ", fmt_unit(rates[fk] or 0, unit, m.name),
       "      ", { "belt-counter.clear-focus" },
     }
   else
@@ -258,11 +266,13 @@ local function refresh_window(player, c)
   end
 
   -- graph: ring windows plot their own samples; "All" uses the coarsest (10h)
-  -- ring as a proxy. With a focus set, plot only that item's series.
+  -- ring as a proxy. With a focus set, plot only that item's series and color
+  -- the area to that item's quality.
   local gi = (c.sel_win == #WINDOWS) and RING_WINDOWS or c.sel_win
   local gwin = c.windows[gi]
   local gdef = WINDOWS[gi]
   local gname = fk and c.meta[fk].name or nil
+  local bar_style = fk and ("belt_counter_bar_" .. (c.meta[fk].quality or "normal")) or "belt_counter_bar"
   local graph = body.bc_graph_bg.bc_graph
   graph.clear()
   local maxv = 1
@@ -280,10 +290,15 @@ local function refresh_window(player, c)
     local filler = col.add({ type = "empty-widget" })
     filler.style.width = BAR_W
     filler.style.height = GRAPH_MAX_H - hgt
-    local bar = col.add({ type = "empty-widget", style = "belt_counter_bar" })
+    local bar = col.add({ type = "empty-widget", style = bar_style })
+    bar.style.width = BAR_W
     bar.style.height = hgt
     bar.tooltip = fmt_unit(val / sample_secs, unit, gname)
   end
+
+  -- axis labels: peak rate (Y) and the time span (X)
+  body.bc_axis.bc_peak.caption = { "", "Peak ", fmt_unit(maxv / sample_secs, unit, gname) }
+  body.bc_axis.bc_span.caption = (c.sel_win == #WINDOWS) and "all time" or ("last " .. gdef.label)
 
   -- table: one clickable row per item+quality (click the icon to focus)
   local tbl = body.bc_scroll.bc_table
@@ -302,19 +317,18 @@ local function refresh_window(player, c)
       local m = c.meta[k]
       local r = rates[k] or 0
 
-      -- clickable item icon focuses the graph on this item
+      -- clickable item icon WITH the quality badge; click focuses the graph
       local btn = tbl.add({
-        type = "sprite-button", sprite = "item/" .. m.name, style = "slot_button",
+        type = "button", style = "slot_button",
+        caption = "[item=" .. m.name .. ",quality=" .. m.quality .. "]",
         tags = { bc_focus = k }, tooltip = { "item-name." .. m.name },
       })
-      btn.style.size = 32
+      btn.style.size = 36
+      btn.style.font = "default-large"
       btn.toggled = (c.focus_key == k)
 
-      -- name + the quality symbol (no letter)
-      local cap = (m.quality == "normal")
-        and { "item-name." .. m.name }
-        or  { "", { "item-name." .. m.name }, "  [quality=" .. m.quality .. "]" }
-      local name_lbl = tbl.add({ type = "label", caption = cap })
+      -- plain item name (quality is shown by the badge on the icon)
+      local name_lbl = tbl.add({ type = "label", caption = { "item-name." .. m.name } })
       name_lbl.style.font = "default-large-semibold"
       name_lbl.style.font_color = QUALITY_COLOR[m.quality] or { 1, 1, 1 }
       name_lbl.style.left_margin = 8
