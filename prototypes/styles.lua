@@ -13,13 +13,15 @@ local function bar(tint)
   }
 end
 
--- highlighted slot for the currently-focused item's icon
+-- Highlight for the focused item's icon: make the vanilla yellow hover state
+-- "stick" by reusing slot_button's own hovered graphical set as the default.
+local slot = data.raw["gui-style"].default.slot_button
 styles["belt_counter_sel_slot"] = {
   type = "button_style",
   parent = "slot_button",
-  default_graphical_set = { base = { filename = "__core__/graphics/white-square.png", size = 1, tint = { 0.30, 0.55, 0.48, 1 } } },
-  hovered_graphical_set = { base = { filename = "__core__/graphics/white-square.png", size = 1, tint = { 0.38, 0.68, 0.58, 1 } } },
-  clicked_graphical_set = { base = { filename = "__core__/graphics/white-square.png", size = 1, tint = { 0.30, 0.55, 0.48, 1 } } },
+  default_graphical_set = slot.hovered_graphical_set,
+  hovered_graphical_set = slot.hovered_graphical_set,
+  clicked_graphical_set = slot.clicked_graphical_set,
 }
 
 styles["belt_counter_bar"]           = bar({ 0.48, 0.80, 0.78, 1 })  -- neutral teal
