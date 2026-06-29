@@ -90,9 +90,11 @@ def main():
 
     img = Image.open(src).convert("RGBA")
     if "--white-bg" in sys.argv:
-        # chroma allowance raised so faintly-tinted fringe near the wires is
-        # caught; gated to light pixels (dark metal + saturated wires survive).
-        img = defringe(remove_white_bg(img), passes=3, dark=108, light=212, chroma=42)
+        # lo=188 catches dimmer/slightly-shadowed off-white (e.g. chunks inside
+        # the wire loops); defringe then peels the light AA fringe. Both gated so
+        # dark metal + saturated wires survive.
+        img = defringe(remove_white_bg(img, lo=188, chroma=32),
+                       passes=3, dark=108, light=212, chroma=42)
 
     px = img.load()
     w, h = img.size
