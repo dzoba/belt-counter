@@ -15,8 +15,8 @@ DEST="$STAGE/${NAME}_${VERSION}"
 mkdir -p "$DEST"
 
 # Mod files only.
-cp info.json data.lua control.lua "$DEST"/
-cp -R prototypes locale "$DEST"/
+cp info.json data.lua control.lua changelog.txt "$DEST"/
+cp -R prototypes scripts locale "$DEST"/
 mkdir -p "$DEST/graphics"
 cp graphics/icon.png graphics/entity.png "$DEST/graphics"/
 

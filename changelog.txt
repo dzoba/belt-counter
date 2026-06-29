@@ -1,0 +1,13 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.1.0
+Date: 2026-06-28
+  Features:
+    - Belt Counter: a combinator-style building that measures belt item throughput
+      over time, broken down by quality.
+    - Standalone window UI with selectable time windows (5s / 1m / 10m / 1h / 10h / All)
+      and rate units (items/s, items/min, items/hour, stacks/s).
+    - Per item-and-quality rate table with share bars, plus a bucketed time-series graph.
+    - Optional circuit-network output of the measured rate, with feedback cancellation.
+  Info:
+    - Requires Factorio 2.0. Quality breakdown requires the Space Age "quality" mod.
+    - Recipe (5 copper cable + 5 electronic circuit) is unlocked by Circuit network.

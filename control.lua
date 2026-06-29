@@ -16,6 +16,8 @@
 --   constant-combinator output. That output lands on the same network we read,
 --   so we subtract our own last output from each read (feedback cancellation).
 
+local M = require("scripts.model")
+
 local NAME = "belt-counter"
 
 local OUTPUT_EVERY = 15           -- recompute circuit output 4x/second
@@ -23,97 +25,16 @@ local GUI_REFRESH  = 15           -- redraw open windows ~4x/second
 local GRAPH_MAX_H  = 90           -- px, tallest graph bar
 local BAR_W        = 4            -- px, graph bar width
 
--- Time windows. Each is an independent ring of `samples` buckets; a bucket
--- advances every `seconds*60/samples` ticks. "all" has no ring (lifetime).
-local WINDOWS = {
-  { id = "5s",  label = "5s",  seconds = 5,     samples = 50 },
-  { id = "1m",  label = "1m",  seconds = 60,    samples = 60 },
-  { id = "10m", label = "10m", seconds = 600,   samples = 60 },
-  { id = "1h",  label = "1h",  seconds = 3600,  samples = 60 },
-  { id = "10h", label = "10h", seconds = 36000, samples = 60 },
-  { id = "all", label = "All", seconds = nil,   samples = 0  },
-}
-local RING_WINDOWS = 5            -- first N entries are real rings; last is "all"
-local DEFAULT_WIN  = 2            -- 1m
-
--- Display units. factor converts items/second into the unit; stacks is special.
-local UNITS = {
-  { id = "per_s", label = "items/s", factor = 1,    suffix = "/s" },
-  { id = "per_m", label = "items/min", factor = 60,   suffix = "/m" },
-  { id = "per_h", label = "items/h", factor = 3600, suffix = "/h" },
-  { id = "stacks_s", label = "stacks/s", stacks = true, suffix = " stk/s" },
-}
-local DEFAULT_UNIT = 1
-
-local QUALITY_COLOR = {
-  normal    = { 0.85, 0.85, 0.85 },
-  uncommon  = { 0.4,  0.9,  0.4 },
-  rare      = { 0.4,  0.6,  1.0 },
-  epic      = { 0.75, 0.4,  1.0 },
-  legendary = { 1.0,  0.6,  0.2 },
-}
-local QUALITY_LETTER = {
-  normal = "N", uncommon = "U", rare = "R", epic = "E", legendary = "L",
-}
-
-----------------------------------------------------------------------
--- helpers
-----------------------------------------------------------------------
-local function round(x) return math.floor(x + 0.5) end
-
-local function key_of(name, quality) return name .. "/" .. quality end
-
-local function new_sample() return { total = 0, by_key = {} } end
-
-local function stack_size(name)
-  local proto = prototypes.item[name]
-  return (proto and proto.stack_size) or 1
-end
-
-local function fmt(v)
-  if v == 0 then return "0" end
-  if v >= 100 then return tostring(round(v)) end
-  return string.format("%.1f", v)
-end
-
--- per-second value -> string in the given unit
-local function fmt_unit(per_sec, unit, item_name)
-  if unit.stacks then
-    return fmt(per_sec / stack_size(item_name)) .. unit.suffix
-  end
-  return fmt(per_sec * unit.factor) .. unit.suffix
-end
-
-----------------------------------------------------------------------
--- counter data model
-----------------------------------------------------------------------
-local function fresh_counter(entity)
-  local windows = {}
-  for w = 1, RING_WINDOWS do
-    local def = WINDOWS[w]
-    local samples = {}
-    for i = 1, def.samples do samples[i] = new_sample() end
-    windows[w] = {
-      samples  = samples,
-      idx      = 1,
-      ticks    = 0,
-      interval = math.max(1, round(def.seconds * 60 / def.samples)),
-      warm     = 1,
-    }
-  end
-  return {
-    entity         = entity,
-    unit_number    = entity.unit_number,
-    windows        = windows,
-    totals         = {},          -- key -> lifetime count
-    meta           = {},          -- key -> {name=, quality=}
-    start_tick     = nil,         -- set on first tick we see it
-    output_enabled = false,
-    last_output    = {},          -- key -> count we emitted (feedback cancel)
-    sel_win        = DEFAULT_WIN, -- selected window index (1..#WINDOWS)
-    unit_idx       = DEFAULT_UNIT,
-  }
-end
+-- Config / helpers / data model live in the testable model module.
+local WINDOWS        = M.WINDOWS
+local RING_WINDOWS   = M.RING_WINDOWS
+local UNITS          = M.UNITS
+local QUALITY_COLOR  = M.QUALITY_COLOR
+local QUALITY_LETTER = M.QUALITY_LETTER
+local round          = M.round
+local key_of         = M.key_of
+local fmt_unit       = M.fmt_unit
+local fresh_counter  = M.fresh_counter
 
 ----------------------------------------------------------------------
 -- registry
@@ -154,29 +75,10 @@ local function read_network(entity, connector, into, meta)
 end
 
 ----------------------------------------------------------------------
--- rates
+-- rates (wrap the model with the current game tick)
 ----------------------------------------------------------------------
--- per-second rate for every key in the selected window. Returns table key->rate
--- and the window's elapsed seconds (for context).
 local function rates_for(c, win_index)
-  local rates = {}
-  if win_index == #WINDOWS then
-    -- "All": lifetime totals over uptime
-    local uptime = math.max(1, (game.tick - (c.start_tick or game.tick)) / 60)
-    for k, v in pairs(c.totals) do rates[k] = v / uptime end
-    return rates, uptime
-  end
-  local win = c.windows[win_index]
-  local def = WINDOWS[win_index]
-  local sums = {}
-  for i = 1, def.samples do
-    for k, v in pairs(win.samples[i].by_key) do
-      sums[k] = (sums[k] or 0) + v
-    end
-  end
-  local elapsed = math.max(0.001, math.min(win.warm, def.samples) * win.interval / 60)
-  for k, v in pairs(sums) do rates[k] = v / elapsed end
-  return rates, elapsed
+  return M.rates_for(c, win_index, game.tick)
 end
 
 ----------------------------------------------------------------------
@@ -217,7 +119,6 @@ end
 ----------------------------------------------------------------------
 local function tick_counter(c, tick)
   if not c.entity.valid then return false end
-  if not c.start_tick then c.start_tick = tick end
 
   local incoming = {}
   read_network(c.entity, defines.wire_connector_id.circuit_red, incoming, c.meta)
@@ -228,29 +129,7 @@ local function tick_counter(c, tick)
     end
   end
 
-  -- add to every ring window's current sample + lifetime totals
-  for k, v in pairs(incoming) do
-    if v > 0 then
-      for w = 1, RING_WINDOWS do
-        local s = c.windows[w].samples[c.windows[w].idx]
-        s.total = s.total + v
-        s.by_key[k] = (s.by_key[k] or 0) + v
-      end
-      c.totals[k] = (c.totals[k] or 0) + v
-    end
-  end
-
-  -- advance each window independently
-  for w = 1, RING_WINDOWS do
-    local win = c.windows[w]
-    win.ticks = win.ticks + 1
-    if win.ticks >= win.interval then
-      win.ticks = 0
-      win.idx = (win.idx % WINDOWS[w].samples) + 1
-      win.samples[win.idx] = new_sample()
-      if win.warm < WINDOWS[w].samples then win.warm = win.warm + 1 end
-    end
-  end
+  M.accumulate(c, incoming, tick)
 
   if c.output_enabled and tick % OUTPUT_EVERY == 0 then write_output(c) end
   return true
@@ -298,7 +177,7 @@ local function build_window(player, c)
   for _, u in ipairs(UNITS) do unit_dd.add_item(u.label) end
   title.add({
     type = "sprite-button", name = "bc_close", style = "frame_action_button",
-    sprite = "utility/close", hovered_sprite = "utility/close", tooltip = { "gui.close" },
+    sprite = "utility/close", tooltip = { "gui.close" },
   })
 
   local body = win.add({ type = "frame", name = "bc_body", style = "inside_shallow_frame_with_padding", direction = "vertical" })
