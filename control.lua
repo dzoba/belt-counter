@@ -22,9 +22,14 @@ local NAME = "belt-counter"
 
 local OUTPUT_EVERY = 15           -- recompute circuit output 4x/second
 local GUI_REFRESH  = 15           -- redraw open windows ~4x/second
-local GRAPH_MAX_H  = 90           -- px, tallest graph bar
-local BAR_W        = 5            -- px, graph bar width (contiguous = area chart)
-local STRUCT_VERSION = 3          -- bump when the window's element layout changes
+local STRUCT_VERSION = 4          -- bump when the window's element layout changes
+
+-- Line-graph chart: drawn with LuaRendering onto a hidden surface, shown via a
+-- camera element. 384x128 px element at zoom 0.5 = 16 px/tile = a 24x8 tile box.
+local CHART_SURFACE = "belt-counter-chart"
+local CHART_W, CHART_H = 24, 8        -- tiles
+local CAM_W, CAM_H = 384, 128         -- camera element pixels
+local CAM_ZOOM = CAM_W / (32 * CHART_W)
 
 -- Config / helpers / data model live in the testable model module.
 local WINDOWS        = M.WINDOWS
@@ -143,11 +148,95 @@ local function on_tick(event)
 end
 
 ----------------------------------------------------------------------
+-- chart surface + LuaRendering line graph
+----------------------------------------------------------------------
+local function ensure_chart_surface()
+  local s = game.surfaces[CHART_SURFACE]
+  if s then return s end
+  s = game.create_surface(CHART_SURFACE, {
+    default_enable_all_autoplace_controls = false,
+    autoplace_settings = {
+      tile       = { settings = { ["out-of-map"] = {} } },
+      decorative = { treat_missing_as_default = false, settings = {} },
+      entity     = { treat_missing_as_default = false, settings = {} },
+    },
+    starting_area = "none",
+  })
+  s.generate_with_lab_tiles = true
+  return s
+end
+
+-- each player draws into their own region so cameras/lines don't collide
+local function chart_region(player_index)
+  return (player_index - 1) * (CHART_W + 4), 0
+end
+
+local function prepare_region(surf, x0, y0)
+  surf.request_to_generate_chunks({ x0 + CHART_W / 2, y0 + CHART_H / 2 }, 2)
+  surf.force_generate_chunk_requests()
+  local tiles = {}
+  for x = x0 - 1, x0 + CHART_W + 1 do
+    for y = y0 - 1, y0 + CHART_H + 1 do
+      tiles[#tiles + 1] = { name = "lab-dark-1", position = { x, y } }
+    end
+  end
+  surf.set_tiles(tiles, false)
+end
+
+local function clear_chart(player_index)
+  local ids = storage.chart_ids and storage.chart_ids[player_index]
+  if not ids then return end
+  for _, id in ipairs(ids) do
+    local o = rendering.get_object_by_id(id)
+    if o and o.valid then o.destroy() end
+  end
+  storage.chart_ids[player_index] = nil
+end
+
+-- redraw the line + filled area for one player's window
+local function draw_chart(player, c, gwin, gdef, maxv, fk)
+  local surf = ensure_chart_surface()
+  local x0, y0 = chart_region(player.index)
+  clear_chart(player.index)
+  local pf = { player.index }
+  local col = fk and (QUALITY_COLOR[c.meta[fk].quality] or { 1, 1, 1 }) or { 0.48, 0.80, 0.78 }
+  local ids = {}
+
+  ids[#ids + 1] = rendering.draw_rectangle({ left_top = { x0, y0 }, right_bottom = { x0 + CHART_W, y0 + CHART_H },
+    color = { 0.45, 0.45, 0.45, 0.5 }, width = 1, surface = surf, players = pf }).id
+  ids[#ids + 1] = rendering.draw_line({ from = { x0, y0 + CHART_H / 2 }, to = { x0 + CHART_W, y0 + CHART_H / 2 },
+    color = { 0.45, 0.45, 0.45, 0.3 }, width = 1, surface = surf, players = pf }).id
+
+  local N = gdef.samples
+  local vals = {}
+  for i = 1, N do
+    local bi = ((gwin.idx + i - 1) % N) + 1   -- oldest -> newest
+    vals[i] = fk and (gwin.samples[bi].by_key[fk] or 0) or gwin.samples[bi].total
+  end
+  local function px(i) return x0 + (i - 1) / (N - 1) * CHART_W end
+  local function py(v) return y0 + CHART_H * (1 - v / maxv) end   -- world Y is down
+
+  local verts = { { x0, y0 + CHART_H } }
+  for i = 1, N do verts[#verts + 1] = { px(i), py(vals[i]) } end
+  verts[#verts + 1] = { x0 + CHART_W, y0 + CHART_H }
+  ids[#ids + 1] = rendering.draw_polygon({ vertices = verts,
+    color = { col[1], col[2], col[3], 0.22 }, surface = surf, players = pf }).id
+
+  for i = 1, N - 1 do
+    ids[#ids + 1] = rendering.draw_line({ from = { px(i), py(vals[i]) }, to = { px(i + 1), py(vals[i + 1]) },
+      color = col, width = 2, surface = surf, players = pf }).id
+  end
+
+  storage.chart_ids[player.index] = ids
+end
+
+----------------------------------------------------------------------
 -- GUI
 ----------------------------------------------------------------------
 local function close_window(player)
   local w = player.gui.screen.belt_counter_window
   if w then w.destroy() end
+  clear_chart(player.index)
   storage.open[player.index] = nil
 end
 
@@ -210,7 +299,7 @@ local function build_window(player, c)
   -- Y axis: max (top) / mid (center) / 0 (bottom), pushed apart by fillers
   local yax = grow.add({ type = "flow", name = "bc_yaxis", direction = "vertical" })
   yax.style.width = 42
-  yax.style.height = GRAPH_MAX_H
+  yax.style.height = CAM_H
   yax.style.horizontal_align = "right"
   for _, n in ipairs({ "bc_ymax", "bc_ymid", "bc_yzero" }) do
     local l = yax.add({ type = "label", name = n })
@@ -221,11 +310,20 @@ local function build_window(player, c)
     end
   end
 
-  local graph = grow.add({ type = "flow", name = "bc_graph", direction = "horizontal" })
-  graph.style.horizontal_spacing = 0   -- contiguous = area chart
-  graph.style.vertical_align = "bottom"
-  graph.style.height = GRAPH_MAX_H
-  graph.style.left_margin = 4
+  local cx, cy = chart_region(player.index)
+  local surf
+  local ok = pcall(function() surf = ensure_chart_surface(); prepare_region(surf, cx, cy) end)
+  local cam
+  if ok and surf then
+    cam = grow.add({ type = "camera", name = "bc_camera", surface_index = surf.index,
+      position = { cx + CHART_W / 2, cy + CHART_H / 2 }, zoom = CAM_ZOOM })
+  else
+    cam = grow.add({ type = "empty-widget", name = "bc_camera" })   -- graceful fallback
+    log("belt-counter: chart surface setup failed")
+  end
+  cam.style.width = CAM_W
+  cam.style.height = CAM_H
+  cam.style.left_margin = 4
 
   -- X axis row: a "Show all" button (only while focused) + the time span
   local xrow = body.add({ type = "flow", name = "bc_xrow", direction = "horizontal" })
@@ -293,29 +391,14 @@ local function refresh_window(player, c)
   local gwin = c.windows[gi]
   local gdef = WINDOWS[gi]
   local gname = fk and c.meta[fk].name or nil
-  local bar_style = fk and ("belt_counter_bar_" .. (c.meta[fk].quality or "normal")) or "belt_counter_bar"
-  local graph = body.bc_graph_bg.bc_graph_row.bc_graph
-  graph.clear()
   local maxv = 1
   for i = 1, gdef.samples do
     local v = sample_value(gwin.samples[i])
     if v > maxv then maxv = v end
   end
   local sample_secs = gwin.interval / 60
-  for i = 1, gdef.samples do
-    local bi = ((gwin.idx + i - 1) % gdef.samples) + 1   -- oldest -> newest
-    local val = sample_value(gwin.samples[bi])
-    local hgt = math.max(0, round(val / maxv * GRAPH_MAX_H))
-    local col = graph.add({ type = "flow", direction = "vertical" })
-    col.style.vertical_spacing = 0
-    local filler = col.add({ type = "empty-widget" })
-    filler.style.width = BAR_W
-    filler.style.height = GRAPH_MAX_H - hgt
-    local bar = col.add({ type = "empty-widget", style = bar_style })
-    bar.style.width = BAR_W
-    bar.style.height = hgt
-    bar.tooltip = fmt_unit(val / sample_secs, unit, gname)
-  end
+  local dok, derr = pcall(draw_chart, player, c, gwin, gdef, maxv, fk)
+  if not dok then log("belt-counter draw_chart error: " .. tostring(derr)) end
 
   -- Y-axis numbers (max / mid / 0), X-axis span, and show-all visibility
   local peak_rate = maxv / sample_secs
@@ -506,6 +589,7 @@ end
 script.on_init(function()
   storage.counters = {}
   storage.open = {}
+  storage.chart_ids = {}
   register_events()
 end)
 
@@ -514,6 +598,8 @@ script.on_load(register_events)
 script.on_configuration_changed(function()
   storage.counters = storage.counters or {}
   storage.open = storage.open or {}
+  storage.chart_ids = {}
+  rendering.clear("belt-counter")   -- drop any stale chart render objects
   -- close any windows left open across a mod update; they rebuild on next open
   for _, player in pairs(game.players) do
     local w = player.gui.screen.belt_counter_window
