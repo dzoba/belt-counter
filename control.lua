@@ -506,7 +506,11 @@ local function on_gui_click(event)
     local c = counter_for_player(event.player_index)
     if not c then return end
     -- toggle: click the focused item again to clear back to "all"
-    c.focus_key = (c.focus_key == tags.bc_focus) and nil or tags.bc_focus
+    if c.focus_key == tags.bc_focus then
+      c.focus_key = nil
+    else
+      c.focus_key = tags.bc_focus
+    end
     refresh_window(player, c)
   end
 end
