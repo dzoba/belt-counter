@@ -24,7 +24,7 @@ local OUTPUT_EVERY = 15           -- recompute circuit output 4x/second
 local GUI_REFRESH  = 15           -- redraw open windows ~4x/second
 local GRAPH_MAX_H  = 90           -- px, tallest graph bar
 local BAR_W        = 5            -- px, graph bar width (contiguous = area chart)
-local STRUCT_VERSION = 2          -- bump when the window's element layout changes
+local STRUCT_VERSION = 3          -- bump when the window's element layout changes
 
 -- Config / helpers / data model live in the testable model module.
 local WINDOWS        = M.WINDOWS
@@ -199,24 +199,45 @@ local function build_window(player, c)
 
   body.add({ type = "label", name = "bc_summary" }).style.top_margin = 6
 
-  -- graph ---------------------------------------------------------------
-  -- axis row: peak value (Y) on the left, time span (X) on the right
-  local axis = body.add({ type = "flow", name = "bc_axis", direction = "horizontal" })
-  axis.style.top_margin = 4
-  local peak = axis.add({ type = "label", name = "bc_peak" })
-  peak.style.font_color = { 0.7, 0.7, 0.7 }
-  local apush = axis.add({ type = "empty-widget" })
-  apush.style.horizontally_stretchable = true
-  local span = axis.add({ type = "label", name = "bc_span" })
-  span.style.font_color = { 0.7, 0.7, 0.7 }
-
+  -- graph with a Y axis -------------------------------------------------
   local graph_bg = body.add({ type = "frame", name = "bc_graph_bg", style = "inside_deep_frame" })
-  graph_bg.style.height = GRAPH_MAX_H + 8
+  graph_bg.style.top_margin = 4
   graph_bg.style.horizontally_stretchable = true
-  local graph = graph_bg.add({ type = "flow", name = "bc_graph", direction = "horizontal" })
+  local grow = graph_bg.add({ type = "flow", name = "bc_graph_row", direction = "horizontal" })
+  grow.style.padding = 4
+  grow.style.vertical_align = "top"
+
+  -- Y axis: max (top) / mid (center) / 0 (bottom), pushed apart by fillers
+  local yax = grow.add({ type = "flow", name = "bc_yaxis", direction = "vertical" })
+  yax.style.width = 42
+  yax.style.height = GRAPH_MAX_H
+  yax.style.horizontal_align = "right"
+  for _, n in ipairs({ "bc_ymax", "bc_ymid", "bc_yzero" }) do
+    local l = yax.add({ type = "label", name = n })
+    l.style.font = "default-small"
+    l.style.font_color = { 0.7, 0.7, 0.7 }
+    if n ~= "bc_yzero" then
+      yax.add({ type = "empty-widget" }).style.vertically_stretchable = true
+    end
+  end
+
+  local graph = grow.add({ type = "flow", name = "bc_graph", direction = "horizontal" })
   graph.style.horizontal_spacing = 0   -- contiguous = area chart
   graph.style.vertical_align = "bottom"
-  graph.style.padding = 4
+  graph.style.height = GRAPH_MAX_H
+  graph.style.left_margin = 4
+
+  -- X axis row: a "Show all" button (only while focused) + the time span
+  local xrow = body.add({ type = "flow", name = "bc_xrow", direction = "horizontal" })
+  xrow.style.top_margin = 2
+  xrow.style.vertical_align = "center"
+  local clr = xrow.add({ type = "button", name = "bc_clear", caption = { "belt-counter.show-all" } })
+  clr.style.height = 24
+  clr.style.font = "default-small"
+  clr.visible = false
+  xrow.add({ type = "empty-widget" }).style.horizontally_stretchable = true
+  local span = xrow.add({ type = "label", name = "bc_span" })
+  span.style.font_color = { 0.7, 0.7, 0.7 }
 
   -- per item+quality table ---------------------------------------------
   local scroll = body.add({ type = "scroll-pane", name = "bc_scroll" })
@@ -257,14 +278,10 @@ local function refresh_window(player, c)
   local total = 0
   for _, r in pairs(rates) do total = total + r end
 
-  -- summary
+  -- summary (plain text — rich-text icons render fuzzy, so we avoid them)
   if fk then
     local m = c.meta[fk]
-    body.bc_summary.caption = {
-      "", "[item=" .. m.name .. ",quality=" .. m.quality .. "] ",
-      { "item-name." .. m.name }, ":  ", fmt_unit(rates[fk] or 0, unit, m.name),
-      "      ", { "belt-counter.clear-focus" },
-    }
+    body.bc_summary.caption = { "", { "item-name." .. m.name }, ":  ", fmt_unit(rates[fk] or 0, unit, m.name) }
   else
     body.bc_summary.caption = { "belt-counter.total-line", fmt_unit(total, unit, nil) }
   end
@@ -277,7 +294,7 @@ local function refresh_window(player, c)
   local gdef = WINDOWS[gi]
   local gname = fk and c.meta[fk].name or nil
   local bar_style = fk and ("belt_counter_bar_" .. (c.meta[fk].quality or "normal")) or "belt_counter_bar"
-  local graph = body.bc_graph_bg.bc_graph
+  local graph = body.bc_graph_bg.bc_graph_row.bc_graph
   graph.clear()
   local maxv = 1
   for i = 1, gdef.samples do
@@ -300,9 +317,14 @@ local function refresh_window(player, c)
     bar.tooltip = fmt_unit(val / sample_secs, unit, gname)
   end
 
-  -- axis labels: peak rate (Y) and the time span (X)
-  body.bc_axis.bc_peak.caption = { "", "Peak ", fmt_unit(maxv / sample_secs, unit, gname) }
-  body.bc_axis.bc_span.caption = (c.sel_win == #WINDOWS) and "all time" or ("last " .. gdef.label)
+  -- Y-axis numbers (max / mid / 0), X-axis span, and show-all visibility
+  local peak_rate = maxv / sample_secs
+  local yax = body.bc_graph_bg.bc_graph_row.bc_yaxis
+  yax.bc_ymax.caption = fmt_unit(peak_rate, unit, gname)
+  yax.bc_ymid.caption = fmt_unit(peak_rate / 2, unit, gname)
+  yax.bc_yzero.caption = "0"
+  body.bc_xrow.bc_span.caption = (c.sel_win == #WINDOWS) and "all time" or ("last " .. gdef.label)
+  body.bc_xrow.bc_clear.visible = (fk ~= nil)
 
   -- table: one clickable row per item+quality (click the icon to focus)
   local tbl = body.bc_scroll.bc_table
@@ -321,15 +343,15 @@ local function refresh_window(player, c)
       local m = c.meta[k]
       local r = rates[k] or 0
 
-      -- clickable item icon WITH the quality badge; click focuses the graph
+      -- sharp NATIVE item icon + quality badge. A locked choose-elem-button
+      -- won't open the picker but still fires on_gui_click, so it doubles as the
+      -- filter button.
       local btn = tbl.add({
-        type = "button", style = "slot_button",
-        caption = "[item=" .. m.name .. ",quality=" .. m.quality .. "]",
+        type = "choose-elem-button", elem_type = "item-with-quality",
         tags = { bc_focus = k }, tooltip = { "item-name." .. m.name },
       })
-      btn.style.size = 36
-      btn.style.font = "default-large"
-      btn.toggled = (c.focus_key == k)
+      btn.elem_value = { name = m.name, quality = m.quality }
+      btn.locked = true
 
       -- plain item name (quality is shown by the badge on the icon)
       local name_lbl = tbl.add({ type = "label", caption = { "item-name." .. m.name } })
@@ -383,6 +405,11 @@ local function on_gui_click(event)
   if not player then return end
   if el.name == "bc_close" then
     close_window(player)
+    return
+  end
+  if el.name == "bc_clear" then
+    local c = counter_for_player(event.player_index)
+    if c then c.focus_key = nil; refresh_window(player, c) end
     return
   end
   local tags = el.tags
