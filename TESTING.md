@@ -14,6 +14,16 @@ the cheapest checks fail first.
   equivalent). Copy the last ~30 lines back to me — prototype errors show the
   file + field.
 
+## Easiest path: the Map Editor ("sandbox")
+Main menu → Map editor (or `/editor` in a save). It skips the tech/recipe gate —
+spawn the Belt Counter, belts and items straight from the editor inventory.
+Two editor-specific gotchas:
+- **Time must be RUNNING** (top-left time controls). The counter only ticks and
+  belts only move while game time advances; if it's paused, nothing counts. You
+  can also raise the tick speed there to fill the 10h/All windows quickly.
+- **Quality rows need Space Age enabled** for that session; pick a quality in the
+  item picker when placing items.
+
 ## 1. Fast setup (console — needs cheats enabled on the save)
 ```
 /c local p=game.player
